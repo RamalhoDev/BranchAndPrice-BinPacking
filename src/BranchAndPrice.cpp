@@ -31,22 +31,15 @@ pair<BranchAndPrice*, BranchAndPrice*> BranchAndPrice::Solve() {
 	}
 	cout << "Initial lower bound: " << cost << endl;
 
-	if (cost > 119.9) {
-		cout << "Initial solution: ";
-		for (size_t j = 0; j < mp->getLambdaCounter(); j++) {
-			cout << mp->getLambdaValue(j) << " ";
-		}
-		cout << endl;
+	cout << "Initial solution: ";
+	for (size_t j = 0; j < mp->getLambdaCounter(); j++) {
+		cout << mp->getLambdaValue(j) << " ";
 	}
+	cout << endl;
+
 	while (true) {
 		// Get the dual variables
 		IloNumArray pi = mp->getDuals();
-
-		// for (size_t i = 0; i < n; i++) {
-		// 	cout << "Dual variable of constraint " << i << " = " << pi[i] << endl;
-		// }
-
-		// Build and solve the pricing problem
 
 		IloModel pricing_model(mp->env);
 
@@ -112,13 +105,10 @@ pair<BranchAndPrice*, BranchAndPrice*> BranchAndPrice::Solve() {
 
 			pricing_problem.getValues(x, entering_col);
 			vector<bool> items = vector<bool>();
-			// cout << endl << "Entering column:" << endl;
 			for (size_t i = 0; i < n; i++) {
-				bool insertItem = (entering_col[i] < 0.499 ? false : true);
+				bool insertItem = (entering_col[i] < 0.5 ? false : true);
 				items.push_back(insertItem);
-				// cout << entering_col[i] << " " << insertItem << endl;
 			}
-			// cout << endl;
 			lambdaItems->push_back(items);
 
 			// Add the column to the master problem
@@ -126,13 +116,9 @@ pair<BranchAndPrice*, BranchAndPrice*> BranchAndPrice::Solve() {
 			// cout << "Solving the RMP again..." << endl;
 
 			cost = mp->solve();
-			// std::cout << "EEE??" << master.getCplexStatus() << "\n\n\n";
 			pricing_problem.end();
 			if (cost < 0) break;
 		} else {
-			// cout << "No column with negative reduced costs found. The current basis is optimal" << endl;
-
-			// system("cat model.lp");
 			pricing_problem.end();
 			break;
 		}
