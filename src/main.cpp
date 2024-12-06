@@ -9,22 +9,16 @@
 using namespace std;
 
 int main(int argc, char** argv) {
-	const double M = 1e6;
-	vector<int> weight = {2, 1, 3, 3, 5};
-	int capacity = 7;
-	int n = weight.size();
-
-	if (argc != 2) {
-		printf("Usage:\n./bin instance\n");
-		return 0;
-	}
-
 	Data data;
 	data.readData(argv[1]);
 
-	vector<BranchAndPrice*> bp = {new BranchAndPrice(&data)};
+	IloEnv env;
 
-	while (bp.empty()) {
+	auto mp = MasterProblem(&data, env);
+	mp.createModel();
+	vector<BranchAndPrice*> bp = {new BranchAndPrice(&data, &mp)};
+
+	while (!bp.empty()) {
 		auto currBP = bp.back();
 		bp.pop_back();
 		auto nodes = currBP->Solve();
@@ -33,9 +27,10 @@ int main(int argc, char** argv) {
 			bp.push_back(nodes.second);
 		}
 
-		delete nodes.first;
-		delete nodes.second;
+		delete currBP;
 	}
+	cout << mp.getBest() << endl;
+	env.end();
 
 	// itens 1 and 2 are together only on columns 5 and 11
 	// lambda[best.first].setUB(0.0);

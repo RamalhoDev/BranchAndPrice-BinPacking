@@ -1,83 +1,59 @@
 #include "BranchAndPrice.h"
 
-BranchAndPrice::BranchAndPrice(Data* data, vector<pair<int, int>> forbidden, vector<pair<int, int>> together) {
+BranchAndPrice::BranchAndPrice(Data* data, MasterProblem* mp) {
 	this->data = data;
-	this->forbidden = forbidden;
-	this->together = together;
-	masterProblem();
-}
-
-void BranchAndPrice::masterProblem() {
-	const double M = 1e6;
-	int n = data->getNItems();
-
-	IloModel master_model(env);
-
-	lambda = IloNumVarArray(env, n, 0, IloInfinity);
-
-	IloExpr sum_obj(env);
-	partition_constraint = IloRangeArray(env);
-
-	for (int i = 0; i < n; i++) {
-		char var_name[50];
-		sprintf(var_name, "y%d", i);
-
-		lambda[i].setName(var_name);
-		sum_obj += M * lambda[i];
-
-		partition_constraint.add(lambda[i] == 1);
+	this->mp = mp;
+	this->forbidden = vector<pair<int, int>>();
+	this->together = vector<pair<int, int>>();
+	this->lambdaItems = new vector<vector<bool>>();
+	for (size_t i = 0; i < data->getNItems(); i++) {
+		vector<bool> items = vector<bool>();
+		for (size_t j = 0; j < data->getNItems(); j++) {
+			if (i == j) items.push_back(true);
+			items.push_back(false);
+		}
+		lambdaItems->push_back(items);
 	}
 
-	master_model.add(partition_constraint);
-
-	IloObjective master_objective = IloMinimize(env, sum_obj);
-	master_model.add(master_objective);
-
-	for (size_t i = 0; i < forbidden.size(); i++) {
-		auto nodesForb = forbidden[i];
-		lambda[nodesForb.first].setUB(0.0);
-		lambda[nodesForb.second].setUB(0.0);
-	}
-
-	rmp = IloCplex(master_model);
-
-	rmp.setOut(env.getNullStream());  // disables CPLEX log
+	this->lambdasToForbid = vector<int>();
 }
 
 pair<BranchAndPrice*, BranchAndPrice*> BranchAndPrice::Solve() {
 	int n = data->getNItems();
 	vector<vector<double>> z = vector<vector<double>>(n, vector<double>(n, 0));
-	rmp.solve();
+	mp->setForbiddenLambdas(&lambdasToForbid);
 
-	cout << "Initial lower bound: " << rmp.getObjValue() << endl;
+	pair<BranchAndPrice*, BranchAndPrice*> bestBP;
+	double cost = mp->solve();
 
-	cout << "Initial solution: ";
-	for (size_t j = 0; j < lambda.getSize(); j++) {
-		cout << rmp.getValue(lambda[j]) << " ";
+	if (mp->getCurrent() > mp->getBest() || cost < 0) {
+		return bestBP;
 	}
-	cout << endl;
+	cout << "Initial lower bound: " << cost << endl;
 
-	int lambda_counter = n;
-	auto lambdaItems = vector<vector<bool>>(n, vector<bool>());
+	if (cost > 119.9) {
+		cout << "Initial solution: ";
+		for (size_t j = 0; j < mp->getLambdaCounter(); j++) {
+			cout << mp->getLambdaValue(j) << " ";
+		}
+		cout << endl;
+	}
 	while (true) {
 		// Get the dual variables
-		IloNumArray pi(env, n);
+		IloNumArray pi = mp->getDuals();
 
-		IloRangeArray partition_constraint(env);
-		rmp.getDuals(pi, partition_constraint);
-
-		for (size_t i = 0; i < n; i++) {
-			cout << "Dual variable of constraint " << i << " = " << pi[i] << endl;
-		}
+		// for (size_t i = 0; i < n; i++) {
+		// 	cout << "Dual variable of constraint " << i << " = " << pi[i] << endl;
+		// }
 
 		// Build and solve the pricing problem
 
-		IloModel pricing_model(env);
+		IloModel pricing_model(mp->env);
 
-		IloNumVarArray x(env, n, 0, 1, IloNumVar::Bool);
-		IloExpr sum_obj(env, 1);
+		IloNumVarArray x(mp->env, n, 0, 1, IloNumVar::Bool);
+		IloExpr sum_obj(mp->env, 1);
 		IloRange r;
-		IloExpr sumX(env);
+		IloExpr sumX(mp->env);
 
 		for (int i = 0; i < n; i++) {
 			char var_name[50];
@@ -96,7 +72,7 @@ pair<BranchAndPrice*, BranchAndPrice*> BranchAndPrice::Solve() {
 		pricing_model.add(r);
 		for (size_t i = 0; i < this->forbidden.size(); i++) {
 			IloRange forbid_ctr;
-			IloExpr forbid(env);
+			IloExpr forbid(mp->env);
 			forbid += x[forbidden[i].first] + x[forbidden[i].second];
 			char constr[30];
 			sprintf(constr, "forbid_%d_%d", forbidden[i].first, forbidden[i].second);
@@ -108,64 +84,74 @@ pair<BranchAndPrice*, BranchAndPrice*> BranchAndPrice::Solve() {
 
 		for (size_t i = 0; i < this->together.size(); i++) {
 			IloRange tog_ctr;
-			IloExpr tog(env);
-			tog += x[together[i].first] + x[together[i].second];
+			IloExpr tog(mp->env);
+			tog += x[together[i].first] - x[together[i].second];
 			char constr[30];
 			sprintf(constr, "together_%d_%d", together[i].first, together[i].second);
-			tog_ctr = (tog <= 2);
+			tog_ctr = (tog == 0);
 			tog_ctr.setName(name);
 
 			pricing_model.add(tog_ctr);
 		}
 
-		IloObjective objective = IloMinimize(env, sum_obj);
+		IloObjective objective = IloMinimize(mp->env, sum_obj);
 		pricing_model.add(objective);
 
 		IloCplex pricing_problem(pricing_model);
-
+		pricing_problem.setParam(IloCplex::Param::Threads, 1);
+		pricing_problem.setOut(mp->env.getNullStream());
 		pricing_problem.solve();
+		if (pricing_problem.getStatus() == IloAlgorithm::Infeasible) {
+			pricing_problem.end();
+			return bestBP;
+		}
 		if (pricing_problem.getObjValue() < -1e-5) {
 			cout << "Reduced cost is equal to " << pricing_problem.getObjValue() << ", which is less than 0..." << endl;
 
-			IloNumArray entering_col(env, n);
+			IloNumArray entering_col(mp->env, n);
 
 			pricing_problem.getValues(x, entering_col);
 			vector<bool> items = vector<bool>();
-			cout << endl << "Entering column:" << endl;
+			// cout << endl << "Entering column:" << endl;
 			for (size_t i = 0; i < n; i++) {
-				bool insertItem = (entering_col[i] < 0.5 ? false : true);
+				bool insertItem = (entering_col[i] < 0.499 ? false : true);
 				items.push_back(insertItem);
-				cout << entering_col[i] << " " << insertItem << endl;
+				// cout << entering_col[i] << " " << insertItem << endl;
 			}
-			cout << endl;
-			lambdaItems.push_back(items);
+			// cout << endl;
+			lambdaItems->push_back(items);
 
 			// Add the column to the master problem
-			char var_name[50];
-			sprintf(var_name, "y%d", lambda_counter++);
-			IloNumVar new_lambda(master_objective(1) + partition_constraint(entering_col), 0, IloInfinity);
-			new_lambda.setName(var_name);
+			mp->addLambda(entering_col);
+			// cout << "Solving the RMP again..." << endl;
 
-			lambda.add(new_lambda);
-
-			cout << "Solving the RMP again..." << endl;
-
-			rmp.solve();
+			cost = mp->solve();
+			// std::cout << "EEE??" << master.getCplexStatus() << "\n\n\n";
+			pricing_problem.end();
+			if (cost < 0) break;
 		} else {
-			cout << "No column with negative reduced costs found. The current basis is optimal" << endl;
-			cout << "Final master problem: " << endl;
-			system("cat model.lp");
+			// cout << "No column with negative reduced costs found. The current basis is optimal" << endl;
+
+			// system("cat model.lp");
+			pricing_problem.end();
 			break;
 		}
 	}
 
-	double min = 1;
+	if (mp->getCurrent() > mp->getBest()) {
+		return bestBP;
+	}
+
+	double min = 10000;
 	pair<int, int> best = make_pair(-1, -1);
 	for (size_t i = 0; i < n; i++) {
 		for (size_t j = i + 1; j < n; j++) {
-			if (lambdaItems[lambda_counter][i] && lambdaItems[lambda_counter][j]) {
-				z[i][j] += rmp.getValue(lambda[lambda_counter]);
-				z[j][i] += rmp.getValue(lambda[lambda_counter]);
+			for (size_t k = 0; k < mp->getLambdaCounter(); k++) {
+				if (lambdaItems->at(k)[i] && lambdaItems->at(k)[j]) {
+					double valueLambda = mp->getLambdaValue(k);
+					z[i][j] += valueLambda;
+					z[j][i] += valueLambda;
+				}
 			}
 
 			double frac = abs(z[i][j] - 0.5);
@@ -176,14 +162,16 @@ pair<BranchAndPrice*, BranchAndPrice*> BranchAndPrice::Solve() {
 		}
 	}
 
-	for (size_t i = 0; i < forbidden.size(); i++) {
-		auto nodesForb = forbidden[i];
-		lambda[nodesForb.first].setUB(1.0);
-		lambda[nodesForb.second].setUB(1.0);
+	mp->unsetForbiddenLambdas(&lambdasToForbid);
+	cout << abs(min - 0.5) << endl;
+	if (abs(min - 0.5) <= 0.0000001) {
+		if (mp->getCurrent() < mp->getBest()) {
+			mp->setBest(mp->getCurrent());
+		}
+		return bestBP;
 	}
 
-	pair<BranchAndPrice*, BranchAndPrice*> bestBP;
-	if (best.first)
+	if (best.first != -1)
 		bestBP = make_pair(new BranchAndPrice(this, best.first, best.second, true), new BranchAndPrice(this, best.first, best.second, false));
 
 	return bestBP;
@@ -192,12 +180,25 @@ pair<BranchAndPrice*, BranchAndPrice*> BranchAndPrice::Solve() {
 BranchAndPrice::BranchAndPrice(BranchAndPrice* bp, int a, int b, bool forbid) {
 	this->forbidden = bp->forbidden;
 	this->together = bp->together;
-
+	this->mp = bp->mp;
 	this->data = bp->data;
+	this->lambdaItems = bp->lambdaItems;
+	this->lambdasToForbid = bp->lambdasToForbid;
 
-	if (forbid)
+	if (forbid) {
+		for (size_t i = 0; i < mp->getLambdaCounter(); i++) {
+			if (lambdaItems->at(i)[a] && lambdaItems->at(i)[b]) {
+				this->lambdasToForbid.push_back(i);
+			}
+		}
+
 		this->forbidden.push_back(make_pair(a, b));
-	else
+	} else {
+		for (size_t i = 0; i < mp->getLambdaCounter(); i++) {
+			if ((lambdaItems->at(i)[a] && !lambdaItems->at(i)[b]) || (!lambdaItems->at(i)[a] && lambdaItems->at(i)[b])) {
+				this->lambdasToForbid.push_back(i);
+			}
+		}
 		this->together.push_back(make_pair(a, b));
-	masterProblem();
+	}
 }
